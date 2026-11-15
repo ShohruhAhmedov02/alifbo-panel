@@ -42,6 +42,277 @@ label{display:block;font-size:12px;color:var(--hint);margin:8px 0 4px}
 .muted{color:var(--hint);font-size:13px}
 .user{padding:8px 0;border-bottom:1px solid rgba(128,128,128,.2)}
 .user small{color:var(--hint)}
+textarea{width:100%;box-sizing:border-box;font:inherit;padding:10px;border-radius:10px;border:1px solid var(--line,#8884);background:transparent;color:inherit;resize:vertical}
+.checks label{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text);min-height:36px;margin:0}
+.checks input{width:20px;min-height:20px}
+ol{margin:0;padding-left:26px}
+ol li{padding:3px 0}
+#empty{padding:24px 16px}
+</style>
+</head>
+<body>
+<header><h1>Boshqaruv paneli</h1><div class="sub" id="stamp"></div></header>
+<div id="empty" hidden>Bu sahifa faqat bot ichidan ochiladi. Botda «Boshqaruv paneli» tugmasini bosing.</div>
+<nav id="tabs" role="tablist"></nav>
+<main id="main"></main>
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const $ = (h) => { const t = document.createElement('template'); t.innerHTML = h.trim(); return t.content.firstChild; };
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function send(action, confirmText) {
+  const go = () => { if (tg && tg.sendData) tg.sendData(JSON.stringify(action)); else alert(JSON.stringify(action)); };
+  if (confirmText && tg && tg.showConfirm) tg.showConfirm(confirmText, ok => ok && go()); else go();
+}
+async function load() {
+  const m = location.hash.match(/d=([A-Za-z0-9_-]+)/);
+  if (!m) return null;
+  const bin = Uint8Array.from(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+  const stream = new Blob([bin]).stream().pipeThrough(new DecompressionStream('deflate'));
+  return JSON.parse(await new Response(stream).text());
+}
+const SERVICES = {text: 'Matn o‘girish', file: 'Fayl amallari', slides: 'Taqdimot', referat: 'Referat'};
+const PERMS = {stat: 'Statistika', ads: 'Reklama', premium: 'Premium berish', limits: 'Limitlar va bloklash'};
+
+function tabStat(D) {
+  const el = $('<section></section>');
+  const names = {1: 'Kun', 7: 'Hafta', 30: 'Oy'};
+  const box = $('<div class="card"><div class="seg"></div><div class="grid"></div><p class="muted"></p></div>');
+  const show = (d) => {
+    const s = D.stat[d];
+    box.querySelector('.grid').innerHTML = [['Faol foydalanuvchilar', s.active], ['Yangi foydalanuvchilar', s.new], ['Matn o‘girish', s.text],
+      ['Fayl amallari', s.file], ['Taqdimotlar', s.slides], ['Referatlar', s.referat]]
+      .map(([k, v]) => `<div class="kpi"><b>${v}</b><span>${k}</span></div>`).join('');
+    box.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.d == d));
+  };
+  for (const d of [1, 7, 30]) { const b = $(`<button type="button" data-d="${d}">${names[d]}</button>`); b.onclick = () => show(d); box.querySelector('.seg').append(b); }
+  box.querySelector('p').textContent = `Jami ro‘yxatda: ${D.users} · Premium: ${D.premium_count}`;
+  el.append(box); show(1);
+  const top = $('<div class="card"><h2>Eng ko‘p so‘ralgan mavzular</h2></div>');
+  top.append(D.topics.length ? $('<ol>' + D.topics.map(([t, n]) => `<li>${esc(t)} — <b>${n}</b></li>`).join('') + '</ol>') : $('<p class="muted">Hozircha ma’lumot yo‘q.</p>'));
+  el.append(top);
+  return el;
+}
+function tabLimits(D) {
+  const el = $('<section></section>');
+  const st = $(`<div class="card"><h2>Limitlar: ${D.limits_on ? 'yoqilgan' : 'o‘chiq (hamma narsa cheksiz)'}</h2>
+    <p class="muted">Foydalanuvchilar bu sonlarni ko‘rmaydi.</p><button type="button" class="btn ${D.limits_on ? 'danger' : ''}">${D.limits_on ? 'Limitlarni o‘chirish' : 'Limitlarni yoqish'}</button></div>`);
+  st.querySelector('button').onclick = () => send({a: 'limits_toggle'});
+  el.append(st);
+  const mk = (title, table, kind, rows) => {
+    const c = $(`<div class="card"><h2>${title}</h2><table><tr><th></th><th>Bepul</th><th>Premium</th></tr></table><button type="button" class="btn">Saqlash</button></div>`);
+    for (const [key, label] of rows)
+      c.querySelector('table').append($(`<tr><td>${label}</td><td><input type="number" min="0" inputmode="numeric" data-p="free" data-k="${key}" value="${table.free[key]}" aria-label="${label}, bepul"></td>
+        <td><input type="number" min="0" inputmode="numeric" data-p="premium" data-k="${key}" value="${table.premium[key]}" aria-label="${label}, premium"></td></tr>`));
+    c.querySelector('button').onclick = () => {
+      const v = {free: {}, premium: {}};
+      c.querySelectorAll('input').forEach(i => v[i.dataset.p][i.dataset.k] = Math.max(0, parseInt(i.value || '0', 10)));
+      send({a: 'limits_set', t: kind, v});
+    };
+    return c;
+  };
+  el.append(mk('Kunlik limitlar', D.limits, 'limits', Object.entries(SERVICES)));
+  el.append(mk('Eng katta hajm', D.max_size, 'max_size', [['slides', 'Taqdimot (slayd)'], ['referat', 'Referat (bet)']]));
+  const bl = $(`<div class="card"><h2>Foydalanuvchini bloklash</h2><label for="bid">Telegram ID</label><input id="bid" inputmode="numeric" placeholder="123456789">
+    <div class="row"><button type="button" class="btn danger">Bloklash</button><button type="button" class="btn ghost">Blokdan chiqarish</button></div></div>`);
+  const [b1, b2] = bl.querySelectorAll('button');
+  const id = () => bl.querySelector('input').value.trim();
+  b1.onclick = () => /^\d{5,}$/.test(id()) && send({a: 'block', id: id(), on: true}, 'Shu foydalanuvchi bloklansinmi?');
+  b2.onclick = () => /^\d{5,}$/.test(id()) && send({a: 'block', id: id(), on: false});
+  el.append(bl);
+  return el;
+}
+function tabPremium(D) {
+  const el = $('<section></section>');
+  const give = $(`<div class="card"><h2>Premium berish</h2><label for="pq">Foydalanuvchi: ID, @username yoki ism</label><input id="pq" placeholder="masalan 123456789 yoki ali">
+    <label for="pd">Muddat</label><select id="pd"><option value="7">7 kun</option><option value="30" selected>30 kun</option><option value="90">90 kun</option><option value="365">1 yil</option></select>
+    <button type="button" class="btn">Premium berish</button><button type="button" class="btn ghost">Premiumni olib tashlash</button>
+    <p class="muted">Ism bo‘yicha bir nechta odam topilsa, bot chatda tanlashni so‘raydi.</p></div>`);
+  const [g1, g2] = give.querySelectorAll('button');
+  const q = () => give.querySelector('#pq').value.trim();
+  g1.onclick = () => q() && send({a: 'prem', q: q(), days: +give.querySelector('#pd').value});
+  g2.onclick = () => q() && send({a: 'prem', q: q(), days: 0}, 'Premium olib tashlansinmi?');
+  el.append(give);
+  const list = $(`<div class="card"><h2>Premium obunachilar: ${D.premium_count}</h2><div class="seg"></div><div class="list"></div></div>`);
+  const sorts = {exp: ['Tez tugaydigan', (a, b) => a.until - b.until], new: ['Uzoq muddatli', (a, b) => b.until - a.until], act: ['Eng faol', (a, b) => b.total - a.total]};
+  const show = (k) => {
+    const rows = [...D.premium].sort(sorts[k][1]);
+    list.querySelector('.list').innerHTML = rows.length ? rows.map(u => {
+      const d = new Date(u.until * 1000), left = Math.max(0, Math.ceil((u.until * 1000 - Date.now()) / 864e5));
+      return `<div class="user"><b>${esc(u.name || 'Noma’lum')}</b><br><small>ID ${u.id} · ${d.toLocaleDateString('ru-RU')} gacha (${left} kun) · ${u.total} ta amal</small></div>`;
+    }).join('') : '<p class="muted">Hozircha yo‘q.</p>';
+    list.querySelectorAll('.seg button').forEach(b => b.setAttribute('aria-pressed', b.dataset.k == k));
+    list.querySelectorAll('.user').forEach((n, i) => n.onclick = () => { give.querySelector('#pq').value = rows[i].id; give.scrollIntoView({behavior: 'smooth'}); });
+  };
+  for (const k in sorts) { const b = $(`<button type="button" data-k="${k}">${sorts[k][0]}</button>`); b.onclick = () => show(k); list.querySelector('.seg').append(b); }
+  el.append(list); show('exp');
+  const pay = $(`<div class="card"><h2>Narx va to‘lov matni</h2><label for="pay">Foydalanuvchi «Premium» bo‘limida shuni ko‘radi</label><input id="pay" value="${esc(D.pay_info)}">
+    <button type="button" class="btn">Saqlash</button></div>`);
+  pay.querySelector('button').onclick = () => send({a: 'pay', text: pay.querySelector('input').value.trim()});
+  el.append(pay);
+  return el;
+}
+function tabPeople(D) {
+  const el = $('<section></section>');
+  const form = $(`<div class="card"><h2>Foydalanuvchini boshqarish</h2><label for="uid">Telegram ID (ro‘yxatdan tanlang yoki yozing)</label><input id="uid" inputmode="numeric" placeholder="123456789">
+    <p class="muted" id="uinfo">Pastdagi ro‘yxatdan odamni bosing.</p>
+    ${D.can.premium ? `<label for="gd">Premium sovg‘a qilish</label><div class="row"><select id="gd"><option value="7">7 kun</option><option value="30" selected>30 kun</option><option value="90">90 kun</option><option value="365">1 yil</option></select><input id="gdc" type="number" min="1" inputmode="numeric" placeholder="yoki kun soni" aria-label="Kun soni"></div>
+    <button type="button" class="btn" data-x="gift">Premium berish</button><button type="button" class="btn ghost" data-x="ungift">Premiumni olib tashlash</button>` : ''}
+    ${D.can.limits ? `<label>Shaxsiy kunlik limit (bo‘sh qolsa — umumiy limit)</label><div class="grid">${Object.entries(SERVICES).map(([k, v]) => `<input type="number" min="0" inputmode="numeric" data-l="${k}" placeholder="${v}" aria-label="${v} limiti">`).join('')}</div>
+    <button type="button" class="btn" data-x="lim">Limitni saqlash</button><button type="button" class="btn ghost" data-x="unlim">Shaxsiy limitni olib tashlash</button>
+    <div class="row"><button type="button" class="btn danger" data-x="block">Bloklash</button><button type="button" class="btn ghost" data-x="unblock">Blokdan chiqarish</button></div>` : ''}
+    ${D.can.owner ? `<label>Admin qilish — ruxsatlarni belgilang</label><div class="checks" id="pperms">${Object.entries(PERMS).map(([k, v]) => `<label><input type="checkbox" value="${k}">${v}</label>`).join('')}</div>
+    <div class="row"><button type="button" class="btn" data-x="mkadmin">Admin qilish</button><button type="button" class="btn ghost" data-x="rmadmin">Adminlikdan olish</button></div>` : ''}</div>`);
+  const id = () => form.querySelector('#uid').value.trim(), ok = () => /^\d{5,}$/.test(id());
+  const on = (x, fn) => { const b = form.querySelector(`[data-x="${x}"]`); if (b) b.onclick = () => ok() && fn(); };
+  on('gift', () => send({a: 'prem', q: id(), days: +(form.querySelector('#gdc').value || form.querySelector('#gd').value)}));
+  on('ungift', () => send({a: 'prem', q: id(), days: 0}, 'Premium olib tashlansinmi?'));
+  on('lim', () => { const v = {}; form.querySelectorAll('[data-l]').forEach(i => { if (i.value !== '') v[i.dataset.l] = +i.value; }); send({a: 'user_limits', id: id(), v}); });
+  on('unlim', () => send({a: 'user_limits', id: id(), v: null}));
+  on('block', () => send({a: 'block', id: id(), on: true}, 'Shu foydalanuvchi bloklansinmi?'));
+  on('unblock', () => send({a: 'block', id: id(), on: false}));
+  on('mkadmin', () => { const perms = [...form.querySelectorAll('#pperms input:checked')].map(i => i.value); if (perms.length) send({a: 'admin', id: id(), perms}); else form.querySelector('#uinfo').textContent = 'Kamida bitta ruxsatni belgilang.'; });
+  on('rmadmin', () => send({a: 'admin_del', id: id()}, 'Adminlikdan olinsinmi?'));
+  el.append(form);
+  const today = new Date().toISOString().slice(0, 10);
+  const admins = new Set((D.admins || []).map(a => String(a.id)));
+  const FILTERS = {all: ['Hammasi', () => true], active: ['Bugun faol', u => u.last === today], prem: ['Premium', u => u.until], blocked: ['Bloklangan', u => u.blocked]};
+  const list = $(`<div class="card"><h2>Foydalanuvchilar</h2><input id="psearch" type="search" placeholder="Ism, @username yoki ID bo‘yicha izlash" aria-label="Izlash">
+    <div class="row" id="pfilters" style="flex-wrap:wrap">${Object.entries(FILTERS).map(([k, f]) => `<button type="button" class="btn ghost" data-f="${k}" style="flex:1 1 40%">${f[0]} (${D.people.filter(f[1]).length})</button>`).join('')}</div>
+    <p class="muted" id="pcount"></p><div class="list"></div></div>`);
+  let filter = 'all';
+  const draw = () => {
+    const q = list.querySelector('#psearch').value.trim().toLowerCase().replace(/^@/, '');
+    const rows = D.people.filter(u => FILTERS[filter][1](u) && (!q || String(u.id).includes(q) || (u.name || '').toLowerCase().includes(q)));
+    list.querySelectorAll('[data-f]').forEach(b => b.classList.toggle('ghost', b.dataset.f !== filter));
+    list.querySelector('#pcount').textContent = `Ko‘rsatilmoqda: ${rows.length} ta` + (D.users > D.people.length ? ` (jami ${D.users} tadan oxirgi faol ${D.people.length} tasi yuklangan)` : ` (jami ${D.users} ta)`);
+    const box = list.querySelector('.list');
+    box.innerHTML = rows.length ? rows.map(u => {
+      const tags = [u.until ? 'premium ' + new Date(u.until * 1000).toLocaleDateString('ru-RU') + ' gacha' : 'bepul', admins.has(String(u.id)) ? 'ADMIN' : '', u.blocked ? 'BLOKLANGAN' : '', u.lim ? 'shaxsiy limit' : ''].filter(Boolean).join(' · ');
+      return `<div class="user">${u.last === today ? '🟢 ' : ''}<b>${esc(u.name || 'Noma’lum')}</b><br><small>ID ${u.id} · ${u.last === today ? 'bugun faol, ' + u.today + ' ta amal' : 'oxirgi: ' + (u.last || '—')} · jami ${u.total}<br>${tags}</small></div>`;
+    }).join('') : '<p class="muted">Hech kim topilmadi.</p>';
+    box.querySelectorAll('.user').forEach((n, i) => n.onclick = () => {
+      const u = rows[i];
+      form.querySelector('#uid').value = u.id;
+      form.querySelector('#uinfo').textContent = (u.name || 'Noma’lum') + ' tanlandi';
+      form.querySelectorAll('[data-l]').forEach(inp => inp.value = (u.lim && u.lim[inp.dataset.l] != null) ? u.lim[inp.dataset.l] : '');
+      const mine = (D.admins || []).find(a => String(a.id) === String(u.id));
+      form.querySelectorAll('#pperms input').forEach(c => c.checked = !!(mine && mine.perms.includes(c.value)));
+      form.scrollIntoView({behavior: 'smooth'});
+    });
+  };
+  list.querySelector('#psearch').oninput = draw;
+  list.querySelectorAll('[data-f]').forEach(b => b.onclick = () => { filter = b.dataset.f; draw(); });
+  draw();
+  el.append(list);
+  return el;
+}
+function tabAds(D) {
+  const el = $(`<section><div class="card"><h2>Reklama yuborish</h2>
+    <label for="adt">Reklama matni</label><textarea id="adt" rows="7" maxlength="1500" placeholder="Reklama matnini yozing…"></textarea>
+    <label for="adto">Kimga</label><select id="adto"><option value="all">Hammaga (${D.audience.all})</option><option value="free">Faqat bepul foydalanuvchilarga (${D.audience.free})</option><option value="premium">Faqat premium obunachilarga (${D.audience.premium})</option><option value="ids">Tanlangan odamlarga (ID yozaman)</option></select>
+    <div id="adidbox" hidden><label for="adids">ID raqamlar (vergul bilan)</label><input id="adids" placeholder="123456789, 987654321"></div>
+    <button type="button" class="btn">Yuborish</button><p class="muted" id="adinfo">Avval sizga namuna keladi, keyin o‘sha xabar tanlanganlarga tarqatiladi.</p></div>
+    <div class="card"><h2>Rasm yoki videoli reklama</h2><p class="muted">Rasm/videoni botga yuboring, o‘sha xabarga javob qilib <b>/reklama</b> deb yozing va kimga yuborishni tanlang.</p></div></section>`);
+  const q = (s) => el.querySelector(s), info = q('#adinfo');
+  q('#adto').onchange = () => q('#adidbox').hidden = q('#adto').value !== 'ids';
+  q('button').onclick = () => {
+    const text = q('#adt').value.trim(), to = q('#adto').value, ids = q('#adids').value;
+    if (!text) { info.textContent = 'Reklama matnini yozing.'; return; }
+    if (to === 'ids' && !/\d{5,}/.test(ids)) { info.textContent = 'Kamida bitta ID yozing.'; return; }
+    const act = {a: 'ads', to, text}; if (to === 'ids') act.ids = ids;
+    if (new TextEncoder().encode(JSON.stringify(act)).length > 3900) { info.textContent = 'Matn juda uzun — qisqartiring yoki /reklama orqali yuboring.'; return; }
+    const n = to === 'ids' ? (ids.match(/\d{5,}/g) || []).length : D.audience[to];
+    send(act, `Reklama ${n} ta foydalanuvchiga yuborilsinmi?`);
+  };
+  return el;
+}
+function tabAdmins(D) {
+  const el = $('<section></section>');
+  const list = $('<div class="card"><h2>Adminlar</h2></div>');
+  if (!D.admins.length) list.append($('<p class="muted">Qo‘shimcha admin yo‘q.</p>'));
+  for (const a of D.admins) {
+    const row = $(`<div class="user"><b>${esc(a.name || 'Noma’lum')}</b><br><small>ID ${a.id} · ${a.perms.map(p => PERMS[p] || p).join(', ')}</small><button type="button" class="btn ghost">Olib tashlash</button></div>`);
+    row.querySelector('button').onclick = () => send({a: 'admin_del', id: a.id}, 'Admin olib tashlansinmi?');
+    list.append(row);
+  }
+  el.append(list);
+  const add = $(`<div class="card"><h2>Admin tayinlash</h2><label for="aid">Telegram ID</label><input id="aid" inputmode="numeric" placeholder="123456789">
+    <label>Ruxsatlar</label><div class="checks">${Object.entries(PERMS).map(([k, v]) => `<label><input type="checkbox" value="${k}">${v}</label>`).join('')}</div>
+    <button type="button" class="btn">Saqlash</button><p class="muted">Adminlarni faqat bot egasi boshqaradi.</p></div>`);
+  add.querySelector('button').onclick = () => {
+    const id = add.querySelector('#aid').value.trim(), perms = [...add.querySelectorAll('input:checked')].map(i => i.value);
+    if (/^\d{5,}$/.test(id) && perms.length) send({a: 'admin', id, perms});
+  };
+  el.append(add);
+  return el;
+}
+load().then(D => {
+  if (!D) { document.getElementById('empty').hidden = false; return; }
+  document.getElementById('stamp').textContent = 'Ma’lumot: ' + new Date(D.at * 1000).toLocaleString('ru-RU');
+  const tabs = [];
+  if (D.can.stat) tabs.push(['Statistika', tabStat]);
+  if (D.people) tabs.push(['Odamlar', tabPeople]);
+  if (D.can.limits) tabs.push(['Limitlar', tabLimits]);
+  if (D.can.premium) tabs.push(['Premium', tabPremium]);
+  if (D.can.ads) tabs.push(['Reklama', tabAds]);
+  if (D.can.owner) tabs.push(['Adminlar', tabAdmins]);
+  const nav = document.getElementById('tabs'), main = document.getElementById('main');
+  tabs.forEach(([name, make], i) => {
+    const sec = make(D), btn = $(`<button type="button" role="tab">${name}</button>`);
+    btn.onclick = () => { main.querySelectorAll('section').forEach(s => s.classList.remove('on')); sec.classList.add('on');
+      nav.querySelectorAll('button').forEach(b => b.setAttribute('aria-selected', b === btn)); };
+    nav.append(btn); main.append(sec);
+    if (i === 0) btn.onclick();
+  });
+}).catch(e => { document.getElementById('empty').hidden = false; document.getElementById('empty').textContent = 'Ma’lumotni o‘qib bo‘lmadi: ' + e; });
+</script>
+</body>
+</html>
+<!doctype html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Yangi Alifbo — boshqaruv paneli</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root{--bg:var(--tg-theme-bg-color,#f4f7fb);--card:var(--tg-theme-secondary-bg-color,#fff);--text:var(--tg-theme-text-color,#10243e);
+--hint:var(--tg-theme-hint-color,#6b7a8c);--accent:var(--tg-theme-button-color,#0b4f8a);--on:var(--tg-theme-button-text-color,#fff)}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--text);font-size:15px;line-height:1.45}
+header{padding:14px 16px 6px}
+h1{margin:0;font-size:19px}
+.sub{color:var(--hint);font-size:12px}
+nav{display:flex;gap:6px;padding:8px 12px;overflow-x:auto;position:sticky;top:0;background:var(--bg);z-index:2}
+nav button{flex:0 0 auto;border:0;border-radius:999px;padding:9px 14px;min-height:44px;background:var(--card);color:var(--text);font-size:14px}
+nav button[aria-selected="true"]{background:var(--accent);color:var(--on);font-weight:600}
+main{padding:6px 12px 28px}
+section{display:none}
+section.on{display:block}
+.card{background:var(--card);border-radius:14px;padding:14px;margin:10px 0}
+.card h2{margin:0 0 8px;font-size:15px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.kpi{background:var(--bg);border-radius:10px;padding:10px}
+.kpi b{display:block;font-size:22px}
+.kpi span{color:var(--hint);font-size:12px}
+.seg{display:flex;gap:6px;margin-bottom:10px}
+.seg button{flex:1;border:1px solid var(--hint);background:transparent;color:var(--text);border-radius:10px;min-height:44px;font-size:14px}
+.seg button[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--on)}
+table{width:100%;border-collapse:collapse}
+td,th{padding:7px 4px;text-align:left;border-bottom:1px solid rgba(128,128,128,.2);font-size:14px;vertical-align:middle}
+th{color:var(--hint);font-weight:500;font-size:12px}
+input,select{width:100%;min-height:44px;border:1px solid rgba(128,128,128,.4);border-radius:10px;padding:8px 10px;font-size:15px;background:var(--bg);color:var(--text)}
+td input{max-width:86px}
+label{display:block;font-size:12px;color:var(--hint);margin:8px 0 4px}
+.btn{display:block;width:100%;border:0;border-radius:12px;min-height:46px;margin-top:10px;background:var(--accent);color:var(--on);font-size:15px;font-weight:600}
+.btn.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent)}
+.btn.danger{background:#b3261e;color:#fff}
+.row{display:flex;gap:8px}
+.row>*{flex:1}
+.muted{color:var(--hint);font-size:13px}
+.user{padding:8px 0;border-bottom:1px solid rgba(128,128,128,.2)}
+.user small{color:var(--hint)}
 .checks label{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text);min-height:36px;margin:0}
 .checks input{width:20px;min-height:20px}
 ol{margin:0;padding-left:26px}
